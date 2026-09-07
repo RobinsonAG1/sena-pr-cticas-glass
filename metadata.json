@@ -1,0 +1,6 @@
+{
+  "name": "SENA Prácticas Glass",
+  "description": "Portal institucional SENA para la gestión, seguimiento y evaluación de prácticas formativas en etapa productiva.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
