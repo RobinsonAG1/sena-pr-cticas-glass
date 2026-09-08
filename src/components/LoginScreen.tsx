@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { SenaLogo } from './SenaLogo';
 import type { DocumentType, UserRole, UserProfile } from '../types';
-import { supabase, mockAdmin, upsertProfile } from '../lib/supabase';
+import { supabase, mockAdmin, upsertProfile, DEMO_USERS, fetchProfileById, buildUserProfileFromRow } from '../lib/supabase';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserProfile) => void;
@@ -36,10 +36,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [selectedRole, setSelectedRole] = useState<'aprendiz' | 'instructor' | 'admin'>('aprendiz');
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [docType, setDocType] = useState<DocumentType>('Cédula de Ciudadanía');
-  const [docNumber, setDocNumber] = useState('1000234567');
-  const [email, setEmail] = useState('carlos.restrepo@sena.edu.co');
-  const [password, setPassword] = useState('••••••••');
-  const [fullName, setFullName] = useState('Nuevo Usuario SENA');
+  const [docNumber, setDocNumber] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -55,16 +55,23 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   ];
 
   const handleRoleTabChange = (role: 'aprendiz' | 'instructor' | 'admin') => {
+    if (isRegisterMode && role === 'admin') {
+      setErrorMessage('Los administradores solo se crean directamente desde la base de datos.');
+      return;
+    }
     setSelectedRole(role);
     setIsRegisterMode(false);
     setErrorMessage(null);
-    if (role === 'aprendiz') {
-      setDocNumber('1000234567');
-    } else if (role === 'instructor') {
-      setEmail('carlos.restrepo@sena.edu.co');
-    } else {
-      setEmail('coordinacion.academica@sena.edu.co');
+    setDocNumber('');
+    setEmail('');
+  };
+
+  const buildLoginEmail = (): string => {
+    if (selectedRole === 'aprendiz') {
+      const cleanDoc = docNumber.replace(/\D/g, '') || '1000234567';
+      return `aprendiz_${cleanDoc}@sena.edu.co`;
     }
+    return email.trim();
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -73,64 +80,87 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    try {
-      const loginEmail =
-        selectedRole === 'aprendiz'
-          ? `aprendiz_${docNumber.replace(/\D/g, '') || '1000234567'}@sena.edu.co`
-          : email;
+    const loginEmail = buildLoginEmail();
 
-      // Attempt Supabase Auth
+    try {
+      // 1) Intento real con Supabase Auth
       const { data, error } = await supabase.auth.signInWithPassword({
         email: loginEmail,
-        password: password.length >= 6 ? password : 'Password123!',
+        password: password,
       });
 
-      if (error) {
-        console.warn('Supabase auth note:', error.message);
-      }
+      if (!error && data.session?.user) {
+        const sessionUser = data.session.user;
 
-      // Sync the authenticated profile into the profiles table
-      if (data.session?.user) {
-        upsertProfile({
-          id: data.session.user.id,
-          email: data.session.user.email || loginEmail,
-          full_name: data.session.user.user_metadata?.full_name || fullName,
-          role: selectedRole,
-          document_type: docType,
-          document_number: docNumber,
-          ficha_code: 'ADSO 2673890',
+        // 2) Verificar el rol REAL registrado en la tabla `profiles`
+        const profileRow = await fetchProfileById(sessionUser.id);
+        const verifiedRole: UserRole =
+          (profileRow?.role as UserRole) ||
+          (sessionUser.user_metadata?.role as UserRole) ||
+          'aprendiz';
+
+        const baseTemplate =
+          verifiedRole === 'instructor'
+            ? instructorDemo
+            : verifiedRole === 'admin'
+            ? adminDemo
+            : aprendizDemo;
+
+        const user = buildUserProfileFromRow(profileRow, {
+          ...baseTemplate,
+          id: sessionUser.id,
+          email: sessionUser.email || loginEmail,
+          role: verifiedRole,
         });
+
+        // Sincroniza el perfil verificado en la tabla `profiles`
+        upsertProfile({
+          id: user.id,
+          email: user.email,
+          full_name: user.full_name,
+          role: user.role,
+          document_type: user.document_type,
+          document_number: user.document_number,
+          ficha_code: user.ficha_code,
+        });
+
+        // Redirige al Dashboard según el rol VERIFICADO (no el seleccionado)
+        onLoginSuccess(user);
+        return;
       }
 
-      // Successful routing based on role
-      if (selectedRole === 'instructor') {
-        const user: UserProfile = {
-          ...instructorDemo,
-          email: email || instructorDemo.email,
-        };
-        onLoginSuccess(user);
-      } else if (selectedRole === 'admin') {
-        const user: UserProfile = {
-          ...adminDemo,
-          email: email || adminDemo.email,
-        };
-        onLoginSuccess(user);
-      } else {
-        const user: UserProfile = {
-          ...aprendizDemo,
-          document_type: docType,
-          document_number: docNumber || '1000234567',
-        };
-        onLoginSuccess(user);
+      // 3) Fallback demo: la cuenta no existe o Supabase no está disponible.
+      //    Igualmente valida credenciales reales antes de permitir el acceso.
+      const isAprendizEmail =
+        loginEmail.toLowerCase() === DEMO_USERS.aprendiz.email ||
+        loginEmail.toLowerCase() === 'aprendiz_1000234567@sena.edu.co';
+
+      const demoAccount =
+        selectedRole === 'aprendiz' && isAprendizEmail
+          ? DEMO_USERS.aprendiz
+          : selectedRole === 'instructor' && loginEmail.toLowerCase() === DEMO_USERS.instructor.email
+          ? DEMO_USERS.instructor
+          : selectedRole === 'admin' && loginEmail.toLowerCase() === DEMO_USERS.admin.email
+          ? DEMO_USERS.admin
+          : null;
+
+      if (!demoAccount || password !== demoAccount.password) {
+        setErrorMessage(
+          'Credenciales inválidas. Verifique su correo o número de documento y su contraseña.',
+        );
+        return;
       }
+
+      const fallbackUser =
+        demoAccount === DEMO_USERS.instructor
+          ? instructorDemo
+          : demoAccount === DEMO_USERS.admin
+          ? adminDemo
+          : aprendizDemo;
+
+      onLoginSuccess(fallbackUser);
     } catch (err: any) {
-      if (selectedRole === 'instructor') {
-        onLoginSuccess(instructorDemo);
-      } else if (selectedRole === 'admin') {
-        onLoginSuccess(adminDemo);
-      } else {
-        onLoginSuccess(aprendizDemo);
-      }
+      setErrorMessage(err?.message || 'Error al iniciar sesión. Intente de nuevo.');
     } finally {
       setLoading(false);
     }
@@ -140,6 +170,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     e.preventDefault();
     setLoading(true);
     setErrorMessage(null);
+
+    // Los administradores solo se crean directamente desde la base de datos.
+    if (selectedRole === 'admin') {
+      setLoading(false);
+      setErrorMessage('Los administradores solo se crean directamente desde la base de datos.');
+      return;
+    }
 
     try {
       const { data, error } = await supabase.auth.signUp({
@@ -215,7 +252,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           {/* Role Selection Tabs (Aprendiz, Instructor, Administrador) */}
           <div className="space-y-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block text-center">
-              Seleccione su rol de acceso:
+              Seleccione su rol de acceso (su rol real será verificado):
             </span>
             <div className="grid grid-cols-3 gap-1.5 p-1 rounded-2xl bg-slate-950/80 border border-white/10">
               <button
@@ -250,14 +287,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 type="button"
                 id="login-role-admin"
                 onClick={() => handleRoleTabChange('admin')}
+                disabled={isRegisterMode}
+                title={isRegisterMode ? 'El rol admin solo se crea desde la base de datos' : 'Acceso como administrador'}
                 className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
-                  selectedRole === 'admin'
+                  selectedRole === 'admin' && !isRegisterMode
                     ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
+                    : isRegisterMode
+                    ? 'text-slate-600 opacity-60 cursor-not-allowed'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
                 }`}
               >
                 <ShieldCheck className="w-4 h-4" />
                 <span>Admin</span>
+                {isRegisterMode && <span className="text-[8px] font-bold text-amber-500/80">Solo BD</span>}
               </button>
             </div>
           </div>
@@ -481,38 +523,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 {loading ? 'Validando...' : `Iniciar Sesión como ${selectedRole === 'admin' ? 'Admin' : selectedRole === 'instructor' ? 'Instructor' : 'Aprendiz'}`}
                 <ArrowRight className="w-4 h-4" />
               </button>
-
-              {/* Direct Demo Access Buttons */}
-              <div className="pt-4 border-t border-white/[0.08] space-y-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block text-center">
-                  O prueba rápida en 1 clic:
-                </span>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onLoginSuccess(aprendizDemo)}
-                    className="py-1.5 px-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[11px] font-semibold transition-colors cursor-pointer text-center"
-                  >
-                    Demo Aprendiz
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onLoginSuccess(instructorDemo)}
-                    className="py-1.5 px-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold transition-colors cursor-pointer text-center"
-                  >
-                    Demo Instructor
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onLoginSuccess(adminDemo)}
-                    className="py-1.5 px-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[11px] font-semibold transition-colors cursor-pointer text-center"
-                  >
-                    Demo Admin
-                  </button>
-                </div>
-              </div>
 
               {/* Register link */}
               <div className="text-center pt-2">

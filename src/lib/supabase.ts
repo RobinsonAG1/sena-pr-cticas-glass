@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { UserProfile, Evidence, Ficha, Empresa, AlertaItem, HistorialCambios, NotificationItem, UserRole, ApprenticeItem, InstructorItem } from '../types';
+import type { UserProfile, Evidence, Ficha, Empresa, AlertaItem, HistorialCambios, NotificationItem, UserRole, ApprenticeItem, InstructorItem, DocumentType } from '../types';
 
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://jaxuxvekkbhfudwyahty.supabase.co';
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_r7Ok0c6nVvSxoIj9eOsDzw_WUoRUhDK';
@@ -13,12 +13,67 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 // =============================================================================
+// AUTH / PERFIL — Verificación de rol para login y restauración de sesión
+// La fuente de verdad del rol es la tabla `profiles` (columna `role`), no lo
+// que el usuario seleccione en la pantalla de login.
+// =============================================================================
+
+type Row = Record<string, any>;
+
+// Cuentas demo válidas (fallback cuando Supabase no está disponible) para que
+// el login local también valide credenciales reales y no entre con datos vacíos.
+export const DEMO_USERS: Record<UserRole, { email: string; password: string }> = {
+  aprendiz: { email: 'aprendiz@sena.edu.co', password: 'Password123!' },
+  instructor: { email: 'carlos.restrepo@sena.edu.co', password: 'Password123!' },
+  admin: { email: 'coordinacion.academica@sena.edu.co', password: 'Password123!' },
+};
+
+// Lee el perfil del usuario autenticado para verificar su rol real registrado.
+export const fetchProfileById = async (userId: string | undefined): Promise<Row | null> => {
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) {
+    console.warn('fetchProfileById:', error.message);
+    return null;
+  }
+  return (data as Row) || null;
+};
+
+// Combina la fila real de `profiles` (fuente de verdad del rol) con la
+// plantilla demo para completar los campos que no existen en la base de datos.
+export const buildUserProfileFromRow = (row: Row | null, template: UserProfile): UserProfile => {
+  if (!row) return template;
+  const role = (row.role as UserRole) || template.role;
+  return {
+    ...template,
+    id: row.id || template.id,
+    email: row.email || template.email,
+    full_name: row.full_name || template.full_name,
+    role,
+    document_type: (row.document_type as DocumentType) || template.document_type,
+    document_number: row.document_number || template.document_number,
+    ficha_code: row.ficha_code || template.ficha_code,
+    regional: row.regional || template.regional,
+    center: row.center || template.center,
+    avatar_url: row.avatar_url || template.avatar_url,
+    total_hours: Number(row.total_hours) || template.total_hours,
+    required_hours: Number(row.required_hours) || template.required_hours,
+    approved_evidences_count:
+      Number(row.approved_evidences_count) || template.approved_evidences_count,
+    practice_status:
+      (row.practice_status as UserProfile['practice_status']) || template.practice_status,
+  };
+};
+
+// =============================================================================
 // DATA ACCESS LAYER — Lectura y escritura contra el proyecto Supabase
 // Todas las funciones degradan con gracia ([] en error) para que el front
 // mantenga sus datos mock cuando las tablas aún no existen en el proyecto.
 // =============================================================================
-
-type Row = Record<string, any>;
 
 const safeArray = <T>(rows: Row[] | null, mapper: (r: Row) => T): T[] =>
   Array.isArray(rows) ? rows.map(mapper) : [];

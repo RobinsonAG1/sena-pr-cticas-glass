@@ -36,13 +36,15 @@ import {
   insertAlerta,
   insertHistorial,
   updateEvidencia,
+  fetchProfileById,
+  buildUserProfileFromRow,
 } from './lib/supabase';
 import type { UserProfile, UserRole, Evidence, Ficha, EvidenceStatus, NotificationItem, Empresa, HistorialCambios } from './types';
 
 export function App() {
-  // Current user state. Default to authenticated demo aprendiz to show the UI immediately,
-  // while allowing sign-out / sign-in with any role.
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(mockAprendiz);
+  // Current user state. Starts logged-out: the LoginScreen is shown until the
+  // user authenticates and the app routes to the Dashboard of their VERIFIED role.
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [viewingRole, setViewingRole] = useState<UserRole>('aprendiz');
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [evidences, setEvidences] = useState<Evidence[]>(mockEvidences);
@@ -68,29 +70,34 @@ export function App() {
     }
   }, [currentUser?.role]);
 
-  // Sync Supabase Auth listener
+  // Sync Supabase Auth listener (verifica el rol real en `profiles`)
   useEffect(() => {
+    const resolveSessionUser = async (sessionUser: { id: string; email?: string | null; user_metadata?: Record<string, any> }) => {
+      const profileRow = await fetchProfileById(sessionUser.id);
+      const meta = sessionUser.user_metadata || {};
+      const role: UserRole = (profileRow?.role as UserRole) || meta.role || 'aprendiz';
+      const baseTemplate =
+        role === 'instructor'
+          ? mockInstructor
+          : role === 'admin'
+          ? mockAdmin
+          : mockAprendiz;
+
+      const user = buildUserProfileFromRow(profileRow, {
+        ...baseTemplate,
+        id: sessionUser.id,
+        email: sessionUser.email || baseTemplate.email,
+        role,
+      });
+      setCurrentUser(user);
+      setViewingRole(role);
+    };
+
     const checkSession = async () => {
       try {
         const { data } = await supabase.auth.getSession();
         if (data.session?.user) {
-          const meta = data.session.user.user_metadata || {};
-          const role: UserRole = meta.role || 'aprendiz';
-          const baseTemplate =
-            role === 'instructor'
-              ? mockInstructor
-              : role === 'admin'
-              ? mockAdmin
-              : mockAprendiz;
-
-          setCurrentUser({
-            ...baseTemplate,
-            id: data.session.user.id,
-            email: data.session.user.email || 'aprendiz@sena.edu.co',
-            full_name: meta.full_name || baseTemplate.full_name,
-            role: role,
-          });
-          setViewingRole(role);
+          await resolveSessionUser(data.session.user);
         }
       } catch (e) {
         console.warn('Supabase session check:', e);
@@ -102,23 +109,7 @@ export function App() {
     const { data: authListener } = supabase.auth.onAuthStateChange(
       async (_event, session) => {
         if (session?.user) {
-          const meta = session.user.user_metadata || {};
-          const role: UserRole = meta.role || 'aprendiz';
-          const baseTemplate =
-            role === 'instructor'
-              ? mockInstructor
-              : role === 'admin'
-              ? mockAdmin
-              : mockAprendiz;
-
-          setCurrentUser({
-            ...baseTemplate,
-            id: session.user.id,
-            email: session.user.email || 'aprendiz@sena.edu.co',
-            full_name: meta.full_name || baseTemplate.full_name,
-            role: role,
-          });
-          setViewingRole(role);
+          await resolveSessionUser(session.user);
         }
       },
     );
