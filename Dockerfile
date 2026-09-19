@@ -8,7 +8,7 @@ WORKDIR /app
 # Copiar manifiestos de dependencias
 COPY package*.json ./
 
-# Instalar dependencias limpias
+# Instalar dependencias limpias (usa package-lock.json si existe, con fallback a npm install)
 RUN npm ci || npm install
 
 # Variables de entorno para Vite en tiempo de compilación (Coolify Build Args)
@@ -65,5 +65,8 @@ RUN printf 'server {\n\
 
 # Puerto expuesto en el contenedor (Coolify mapeará este puerto)
 EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
